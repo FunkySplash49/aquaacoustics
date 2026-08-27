@@ -9,6 +9,8 @@ numpy>=1.26,<3.0            # array math, FFTs, random number generation
 scipy>=1.11                 # Butterworth filters, signal utilities
 streamlit>=1.32             # the two-page interactive UI
 matplotlib>=3.8             # waveform + correlation plots
+streamlit-folium>=0.23      # interactive Leaflet/OpenStreetMap map inside Streamlit
+folium>=0.16                 # the underlying map-building library (OSM tiles, no API key)
 
 # --- Testing ----------------------------------------------------------------
 pytest>=8.0
