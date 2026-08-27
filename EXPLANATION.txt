@@ -1,0 +1,1022 @@
+================================================================================
+ AELD PROTOTYPE - WHAT IS GOING ON, AND HOW
+================================================================================
+ Acoustic Emission Leak Detection
+ A complete walkthrough of the system: the idea, the physics, the maths,
+ the code, and the honest limitations.
+
+ Written to be read start-to-finish before a live demonstration.
+
+ Companion files:  claude.md  - the original brief and project goals
+                   context.md - progress log, bugs fixed, findings
+ Last updated:     2026-08-26
+ Status:           Complete. 38/38 tests passing. App verified booting clean.
+
+ IMPORTANT CHANGE (2026-08-26): the PyTorch CNN "is this a leak?" stage has
+ been REMOVED from the pipeline and archived to archive/ml_model/. It was an
+ untrained stub returning a hard-coded probability, so it added the heaviest
+ dependency and the slowest stage while contributing nothing to the result.
+ Removing it made detection 33x faster (75.9 ms -> 2.3 ms). Nothing was lost -
+ see archive/ml_model/README.md to bring it back. The system now has NO machine
+ learning in it: the localisation is pure, deterministic signal processing.
+================================================================================
+
+
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+  PART 1   THE PROBLEM AND THE CORE IDEA
+  PART 2   THE SYSTEM AT A GLANCE
+  PART 3   A COMPLETE WORKED EXAMPLE (with real numbers)
+  PART 4   HOW EACH STAGE WORKS
+             4.1  Stage 1 - Acquisition (the forward model)
+             4.2  Stage 2 - GCC-PHAT, the actual measurement
+             4.3  Stage 3 - From time delay to position
+             4.4  The removed CNN stage, and why it went
+  PART 5   THE THREE REFINEMENTS THAT MAKE IT ACCURATE
+  PART 6   WHY THERE IS A CONFIDENCE GATE (the most important part)
+  PART 7   FILE-BY-FILE CODE MAP
+  PART 8   HOW TO RUN IT
+  PART 9   SUGGESTED DEMO SCRIPT
+  PART 10  QUESTIONS YOU ARE LIKELY TO BE ASKED
+  PART 11  WHAT IS REAL AND WHAT IS NOT
+  PART 12  LIMITATIONS AND NEXT STEPS
+
+
+================================================================================
+ PART 1   THE PROBLEM AND THE CORE IDEA
+================================================================================
+
+THE PROBLEM
+-----------
+Water utilities lose a very large fraction of what they pump to leaks in buried
+pipes. The pipe is underground; you cannot see the leak. Digging to look is
+expensive, so you need to know WHERE to dig before you start - ideally to within
+a metre or two over hundreds of metres of pipe.
+
+THE PHYSICAL INSIGHT
+--------------------
+A leak in a pressurised pipe is not silent. Fluid escaping through a small hole
+is turbulent, and turbulence radiates sound: a continuous broadband hiss. That
+sound travels along the pipe wall and the water column in both directions.
+
+So: clamp one acoustic sensor at each end of a pipe section. Both sensors hear
+THE SAME hiss. But not at the same instant - sound takes time to travel, so the
+sensor nearer the leak hears it FIRST.
+
+    Sensor A                    leak                        Sensor B
+      |==========================X============================|
+      0 m                       63 m                       200 m
+      <------- 63 m ------------>|<-------- 137 m ---------->
+
+    Sound reaches A after  63 m / 1200 m/s = 0.0525 s
+    Sound reaches B after 137 m / 1200 m/s = 0.1142 s
+    Difference                             = -0.0617 s
+
+That difference is called the TIME DIFFERENCE OF ARRIVAL, or TDoA. If you can
+measure it, simple geometry gives you the leak position. Measuring it is the
+entire technical problem, and it is harder than it sounds: the difference is
+tens of milliseconds, buried in noise, between two signals that look like
+featureless hiss.
+
+THE CORE IDEA IN ONE SENTENCE
+-----------------------------
+Both sensors record the same noise at different times; cross-correlating the
+two recordings reveals the time offset at which they best line up, and that
+offset converts directly into a distance.
+
+WHY CROSS-CORRELATION IS THE RIGHT TOOL
+---------------------------------------
+The two recordings each contain:
+
+  (a) the leak signal - SHARED between the channels, just time-shifted
+  (b) sensor noise    - INDEPENDENT in each channel
+
+Cross-correlation asks "how well do these two signals agree if I slide one by
+t?" The shared component reinforces itself at the correct t. The independent
+noise does not reinforce at any t, because it has nothing to agree with. So the
+correlation naturally amplifies the thing you want and suppresses the thing you
+do not.
+
+That independence is the whole reason this works, and it is why the simulator
+gives each sensor its own separate noise draw.
+
+
+================================================================================
+ PART 2   THE SYSTEM AT A GLANCE
+================================================================================
+
+THREE STAGES
+------------
+
+  STAGE 1  ACQUIRE    Synthesise (or, on real hardware, read) the two
+                      sensor recordings.
+                      -> src/aeld/signals.py
+
+  STAGE 2  LOCALISE   Measure the TDoA with GCC-PHAT.
+                      -> src/aeld/gccphat.py
+
+  STAGE 3  CONVERT    Turn the TDoA into metres from Sensor A.
+                      -> src/aeld/gccphat.py (locate_leak)
+
+  Orchestration and timing of all three: src/aeld/detector.py
+  User interface:                         app.py
+
+  (There used to be a Stage 2 CNN filter between acquisition and localisation.
+  It is archived - see 4.4.)
+
+
+DATA FLOW
+---------
+
+    SimulationConfig            <- built from the sliders on page 1
+           |
+           v
+    signals.generate_sensor_signals(leak_position, config)
+           |    band-limited noise -> fractional delay -> attenuate -> +noise
+           v
+    sensor_a, sensor_b          <- THE ONLY THING DOWNSTREAM STAGES SEE
+           |
+           +---> gccphat.gcc_phat()              Stage 2: measure tau
+                        |
+                        v
+                 gccphat.locate_leak(tau)        Stage 3: tau -> metres
+                        |
+                        v
+                 DetectionResult -> st.session_state -> page 2 plots
+
+
+THE INFORMATION BOUNDARY  (important, and worth saying out loud in a demo)
+-------------------------------------------------------------------------
+Only Stage 1 ever knows the true leak position - it has to, because it is
+simulating the physics. Stages 2 and 3 receive NOTHING but the two waveform
+arrays, exactly as they would from real hardware.
+
+The true position is carried through the pipeline only so the result can be
+SCORED afterwards. It never influences the answer. This matters: it is what
+makes the accuracy figures meaningful rather than circular.
+
+
+================================================================================
+ PART 3   A COMPLETE WORKED EXAMPLE (with real numbers)
+================================================================================
+
+Every number below is real output from this code, not an illustration.
+Reproduce it exactly with:
+
+    python3 -c "
+    import sys; sys.path.insert(0,'src')
+    from aeld import SimulationConfig, run_detection
+    c = SimulationConfig(pipe_length_m=200., wave_velocity_ms=1200.,
+                         noise_level=0.15, random_seed=7)
+    r = run_detection(63.0, c)
+    print(r.estimated_position_m, r.error_m, r.peak_sharpness)
+    "
+
+--- INPUT: the configuration --------------------------------------------------
+  Pipe length            L   = 200.0 m
+  Wave velocity          v   = 1200.0 m/s
+  Sample rate            fs  = 8000 Hz
+  Leak frequency band        = 100 - 2000 Hz
+  Background noise level     = 0.15
+  Random seed                = 7          (fixed, so this is repeatable)
+
+--- DERIVED automatically -----------------------------------------------------
+  End-to-end travel time     = L / v = 200 / 1200      = 0.1667 s
+  Capture window             = 3 x travel time         = 0.5000 s
+  Samples per sensor         = 0.5 s x 8000 Hz         = 4000
+  Max physical |tau|         = travel time             = 0.166667 s
+
+  The window is deliberately 3x the longest possible delay, so the correlation
+  peak can never fall outside the analysed data.
+
+--- GROUND TRUTH (hidden from the detector) -----------------------------------
+  Leak position              = 63.00 m from Sensor A
+  Distance to A              = 63.00 m
+  Distance to B              = 137.00 m
+  Travel time to A           = 63 / 1200            = 0.052500 s
+  Travel time to B           = 137 / 1200           = 0.114167 s
+  True TDoA (tA - tB)                               = -0.06166667 s
+
+  Negative tau means the wave reached A EARLIER than B, i.e. the leak is
+  nearer Sensor A. Sanity: 63 m < 100 m (midpoint), so this is correct.
+
+--- WHAT THE SENSORS RECORDED -------------------------------------------------
+  Sensor A RMS amplitude     = 0.24870
+  Sensor B RMS amplitude     = 0.20981
+
+  A is louder because it is closer: attenuation is exp(-0.004 x distance),
+  so A gets exp(-0.252) = 0.777 and B gets exp(-0.548) = 0.578.
+
+  Note the delay is 0.0617 s = 493 samples. On a plotted waveform that is
+  invisible to the eye - both traces just look like hiss. This is precisely
+  why a mathematical method is required.
+
+--- STAGE 2: GCC-PHAT MEASUREMENT ---------------------------------------------
+  Frequency bins used        = 1901        (of 4001; the rest were outside
+                                            the 100-2000 Hz leak band and
+                                            were discarded - see PART 5)
+  Correlation array length   = 10685 lags
+  Lag resolution             = 0.00003125 s  (= 0.01875 m of position)
+  Peak found at index        = 3369
+  Peak sharpness             = 40.10       (threshold is 10.0 -> CONFIDENT)
+
+  MEASURED tau               = -0.06166689 s
+  TRUE     tau               = -0.06166667 s
+  Error in tau               =  0.00000022 s  (220 nanoseconds)
+
+--- STAGE 3: CONVERT TO POSITION ----------------------------------------------
+  d = (L + v x tau) / 2
+    = (200.0 + 1200.0 x (-0.06166689)) / 2
+    = (200.0 - 74.00027) / 2
+    = 62.99987 m
+
+--- RESULT --------------------------------------------------------------------
+  Calculated position        = 62.99987 m from Sensor A
+  True position              = 63.00000 m
+  ABSOLUTE ERROR             = 0.000134 m   (0.13 millimetres)
+  As % of pipe length        = 0.000067 %
+  Confidence                 = CONFIDENT (sharpness 40.1 >= 10.0)
+
+--- TIMING --------------------------------------------------------------------
+  Signal acquisition         = 1.9 ms
+  GCC-PHAT localisation      = 0.36 ms
+  TOTAL                      = 2.303 ms
+
+  For comparison, the same run BEFORE the CNN stage was removed took 75.902 ms
+  - of which 73.444 ms was the CNN, almost entirely one-off cost from building
+  the network and initialising the Metal GPU context. Removing a stage that
+  returned a hard-coded constant made the whole system 33x faster.
+
+  THE IMPORTANT OBSERVATION: the actual localisation - the part that does the
+  real work - takes 0.36 ms. GCC-PHAT is a handful of FFTs. This is why the
+  approach is viable on low-power battery hardware buried in a chamber.
+
+
+================================================================================
+ PART 4   HOW EACH STAGE WORKS
+================================================================================
+
+--------------------------------------------------------------------------------
+ 4.1  STAGE 1 - ACQUISITION (the forward model)      src/aeld/signals.py
+--------------------------------------------------------------------------------
+
+This stage answers: "if a leak were at position d, what exactly would the two
+sensors record?" It is the physics simulation. Four steps.
+
+STEP 1 - Build the leak's acoustic signature
+--------------------------------------------
+  white noise  ->  Butterworth bandpass (100-2000 Hz)  ->  normalise
+
+  Why white noise: a turbulent jet radiates broadband sound with no clean
+  tones. White noise has flat power at every frequency, which is exactly that.
+
+  Why band-limit it: real leak energy is concentrated in the low kHz. A 4th
+  order Butterworth bandpass shapes flat noise into that realistic profile.
+
+  ONE CRITICAL DETAIL: the filter is applied with scipy's `sosfiltfilt`, which
+  runs the filter forwards and then backwards. This gives ZERO PHASE
+  DISTORTION. A normal one-pass filter delays the signal slightly, and any
+  delay it introduced would be indistinguishable from the travel-time delay we
+  are trying to measure - it would inject a fake reading straight into the
+  quantity of interest. `sosfiltfilt` eliminates that risk entirely.
+
+  Also: `sos` (second-order sections) rather than transfer-function form,
+  because SOS is far more numerically stable at 4th order and above.
+
+STEP 2 - Delay each copy by its travel time
+-------------------------------------------
+  time to A = distance_A / v          time to B = distance_B / v
+
+  These are converted to samples (time x fs) and applied.
+
+  THE SUBTLE PART - why the delay must be FRACTIONAL:
+  A leak can sit anywhere along the pipe, so the true delay is almost never a
+  whole number of samples. If you rounded to the nearest sample, every answer
+  would be quantised: at 8 kHz and 1200 m/s, one sample of delay equals 0.15 m
+  of path difference, so rounding builds in an error floor for no reason.
+
+  The fix uses the Fourier shift theorem. A pure time shift is a linear phase
+  ramp in the frequency domain:
+
+        x(t - T)   <->   X(f) . exp(-2.pi.i.f.T)
+
+  So: FFT the signal, multiply by that complex exponential, inverse FFT. The
+  exponent is continuous in T, so fractional delays cost nothing extra.
+
+  TWO GOTCHAS, both handled in the code:
+
+    (a) The FFT treats the signal as periodic, so this shift is CIRCULAR -
+        samples pushed off the end wrap around to the front as garbage. The
+        code generates a longer source with guard padding at both ends,
+        applies the shift, then cuts a clean window out of the MIDDLE.
+
+    (b) For an even-length real signal, the final FFT bin is Nyquist. It has
+        no conjugate partner, so an inverse real FFT REQUIRES it to be real.
+        The phase ramp makes it complex for any fractional delay, and the
+        inverse FFT then silently discards the imaginary part - distorting the
+        waveform and leaking energy. The code zeroes that bin, which is the
+        standard treatment. (This was a real bug caught by the tests; it was
+        costing ~0.5% of signal energy before the fix.)
+
+STEP 3 - Attenuate by distance
+------------------------------
+  amplitude factor = exp(-alpha x distance),  alpha = 0.004 /m by default
+
+  Sound loses energy as it propagates. This is why the nearer sensor's trace
+  is visibly taller in the UI - a useful visual cue, though the algorithm does
+  not rely on amplitude at all.
+
+STEP 4 - Add independent sensor noise
+-------------------------------------
+  Each channel gets its OWN Gaussian noise draw, scaled by the noise slider.
+
+  The independence is the point, not an implementation detail. Shared signal +
+  independent noise is the structure cross-correlation exploits. If both
+  channels received the SAME noise, the method would break down completely,
+  because the noise would correlate just as well as the signal.
+
+
+--------------------------------------------------------------------------------
+ 4.2  STAGE 2 - GCC-PHAT, THE ACTUAL MEASUREMENT      src/aeld/gccphat.py
+       This is the section to explain if you only explain one.
+--------------------------------------------------------------------------------
+
+THE STARTING POINT: why plain cross-correlation is not good enough
+------------------------------------------------------------------
+Ordinary cross-correlation would find the delay, but it has two weaknesses:
+
+  1. Its peak is only as sharp as the source's own autocorrelation. Our leak
+     noise is band-limited, so plain correlation produces a broad, rounded
+     hump. A broad peak means an imprecise delay - you cannot tell exactly
+     where the top is.
+
+  2. Loud frequencies dominate. A low-frequency rumble contributes to the
+     answer in proportion to how LOUD it is, not how INFORMATIVE it is.
+
+THE FIX: throw away magnitude, keep only phase
+----------------------------------------------
+GCC-PHAT stands for Generalized Cross-Correlation with PHAse Transform. The
+whole algorithm is four lines of maths:
+
+  1. Transform both signals:      X_A(f) = FFT(sensor_a)
+                                  X_B(f) = FFT(sensor_b)
+
+  2. Cross-power spectrum:        R(f) = X_A(f) . conj(X_B(f))
+
+  3. PHAT whitening:              R'(f) = R(f) / |R(f)|
+
+  4. Back to the lag domain:      r(t) = IFFT( R'(f) )
+
+     Then: tau = the lag t at which r(t) peaks.
+
+WHY STEP 3 IS THE CLEVER BIT
+----------------------------
+Suppose sensor A's signal really is sensor B's, delayed by d. Then:
+
+        X_A(f) = X_B(f) . exp(-2.pi.i.f.d)
+
+Substitute into the cross-power spectrum:
+
+        R(f) = X_A . conj(X_B)
+             = X_B . exp(-2.pi.i.f.d) . conj(X_B)
+             = |X_B(f)|^2 . exp(-2.pi.i.f.d)
+               ^^^^^^^^^^^   ^^^^^^^^^^^^^^^^
+               magnitude     the delay information
+
+Now divide by the magnitude:
+
+        R'(f) = exp(-2.pi.i.f.d)
+
+That is a PURE PHASE RAMP - and the inverse Fourier transform of a pure phase
+ramp is a PERFECT SPIKE at lag d.
+
+The insight: the magnitude was never carrying the timing information. Only the
+phase was. Discarding magnitude therefore loses nothing you needed, and gains
+two things: every frequency now contributes equally (so no loud band can
+dominate), and the peak collapses from a broad hump to a sharp spike.
+
+WHAT THE CODE ACTUALLY DOES, STEP BY STEP
+-----------------------------------------
+  1. Zero-pad to length len(A)+len(B). The FFT correlation theorem gives
+     CIRCULAR correlation; padding makes the circular result equal the linear
+     one, so energy from one end cannot masquerade as correlation at the other.
+
+  2. rfft both signals (real-input FFT: half the bins, same information).
+
+  3. Multiply A by the conjugate of B -> cross-power spectrum.
+
+  4. Divide by |.| + eps -> PHAT whitening. (eps prevents division by zero.)
+
+  4b. BAND-LIMIT: zero every bin outside 100-2000 Hz. See PART 5 - this is
+      the single biggest robustness win in the whole system.
+
+  5. Inverse FFT at 4x length -> the correlation, on a 4x finer lag grid.
+
+  6. Reorder so lag zero sits in the middle, giving a plottable axis running
+     from -max_shift to +max_shift. Optionally restrict to physically
+     reachable lags only (|tau| can never exceed L/v).
+
+  7. argmax to find the peak. Deliberately on the SIGNED correlation, not its
+     absolute value: the true delay produces a POSITIVE spike, and using abs()
+     could latch onto a negative trough and would also break step 8.
+
+  8. Parabolic interpolation for sub-sample precision (see PART 5).
+
+  9. Compute sharpness = peak height / mean level -> the confidence metric.
+
+THE SIGN CONVENTION (getting this wrong mirrors every answer)
+------------------------------------------------------------
+  POSITIVE tau  =>  sensor A's signal arrived LATER  =>  leak nearer B
+  NEGATIVE tau  =>  sensor A's signal arrived EARLIER =>  leak nearer A
+
+There is a dedicated test (`test_sign_convention`) pinning this down, because
+a sign error would place every leak at the wrong end of the pipe while looking
+entirely plausible.
+
+
+--------------------------------------------------------------------------------
+ 4.3  STAGE 3 - FROM TIME DELAY TO POSITION       gccphat.locate_leak()
+--------------------------------------------------------------------------------
+
+Pure geometry, no signal processing. Let d = distance from Sensor A,
+L = pipe length, v = wave velocity.
+
+        time to A  =  d / v
+        time to B  =  (L - d) / v
+
+        tau  =  time to A - time to B
+             =  d/v - (L-d)/v
+             =  (2d - L) / v
+
+Rearranging for d:
+
+        v . tau  =  2d - L
+        2d       =  L + v . tau
+
+        ****************************
+        *   d  =  (L + v.tau) / 2  *
+        ****************************
+
+CHECK IT AT THE THREE POINTS YOU KNOW
+-------------------------------------
+  Leak at the midpoint:  tau = 0      ->  d = L/2          correct
+  Leak at Sensor A:      tau = -L/v   ->  d = (L-L)/2 = 0   correct
+  Leak at Sensor B:      tau = +L/v   ->  d = (L+L)/2 = L   correct
+
+All three are unit tests. The result is finally clipped to [0, L], because
+noise can push the estimate slightly past an endpoint and "a leak 3 m beyond
+the end of the pipe" is not a physical answer.
+
+NOTE THE SENSITIVITY: position scales directly with v. A 5% error in the
+assumed wave velocity produces a 5% error in position. In the field, v is the
+parameter you most need to calibrate.
+
+
+--------------------------------------------------------------------------------
+ 4.4  THE REMOVED CNN STAGE, AND WHY IT WENT      archive/ml_model/
+--------------------------------------------------------------------------------
+
+WHAT WAS THERE
+--------------
+An earlier version of this pipeline had a Stage 2 between acquisition and
+localisation: a PyTorch convolutional neural network that was supposed to
+answer "is this acoustic event even a leak?" before the localiser spent effort
+on it. The motivation is real - a deployed sensor triggers constantly on
+passing trucks, pumps starting, valves closing and ordinary water use, and
+localising every one of those would bury operators in false alarms.
+
+WHY IT WAS REMOVED
+------------------
+The network was never trained. Its weights were random, and the code computed a
+genuine output and then deliberately ignored it, returning a hard-coded 0.97
+instead. It was a placeholder, exactly as originally scoped.
+
+Kept in the pipeline, that placeholder cost:
+
+  * THE HEAVIEST DEPENDENCY. PyTorch is a very large install, and the only
+    thing in the project that needed a platform-specific wheel.
+  * THE SLOWEST STAGE. 73.4 ms of the 75.9 ms total, against 0.36 ms for the
+    real localisation - almost entirely one-off Metal GPU context setup.
+  * A MISLEADING NUMBER IN THE UI. "97% leak probability" looked like a
+    measurement and was not one. Worse, it competed for attention with the
+    peak-sharpness figure, which is the number that actually determines whether
+    a result can be trusted.
+
+Removing it made the system 33x faster end to end (75.9 ms -> 2.3 ms), dropped
+the PyTorch dependency entirely, and made the interface honest by default
+rather than honest-with-a-caveat.
+
+NOTHING WAS DELETED
+-------------------
+archive/ml_model/cnn_filter.py is the complete original module, unmodified.
+archive/ml_model/README.md documents:
+
+  * what is genuinely real in it (the network, the spectrogram feature, the
+    real forward pass, MPS/CUDA/CPU device selection with a CPU fallback, and
+    the fixed 64x64 input resampling that works around a genuine MPS
+    limitation on non-divisible adaptive pooling)
+  * what is not (the untrained weights and the hard-coded probability)
+  * exactly how to reinstate it - file restore, __init__ re-export, the
+    detector.py stage insertion, the five DetectionResult fields to restore,
+    and `python setup.py --with-ml`
+  * a four-point checklist for training it into something real
+
+WHAT THIS MEANS FOR THE SYSTEM AS IT STANDS
+-------------------------------------------
+There is now NO machine learning in the active pipeline. That is worth stating
+plainly rather than hiding, because it is a strength for this particular job:
+the localisation is deterministic, explainable line by line, and covered by
+tests that would fail if the maths broke. Nothing about the reported position
+depends on a learned model.
+
+The honest cost is a real capability gap: the system assumes what it hears is a
+leak. It cannot tell a leak from a passing truck. Closing that gap needs a
+trained classifier, which needs labelled field recordings - and that is the
+single largest remaining step towards a product.
+
+================================================================================
+ PART 5   THE THREE REFINEMENTS THAT MAKE IT ACCURATE
+================================================================================
+
+Textbook GCC-PHAT gets you a delay. These three additions are what take it
+from "roughly right" to sub-millimetre in the worked example.
+
+REFINEMENT 1 - PARABOLIC SUB-SAMPLE INTERPOLATION
+-------------------------------------------------
+PROBLEM: the correlation is only evaluated at discrete lags, but the true peak
+almost always lies BETWEEN two of them. Taking the highest sample caps your
+accuracy at half a sample - here, 0.075 m of position.
+
+SOLUTION: fit a parabola through the highest sample and its two neighbours,
+then solve for the vertex:
+
+        offset = 0.5 . (y_prev - y_next) / (y_prev - 2.y_peak + y_next)
+
+That offset (roughly -0.5 to +0.5) is added to the integer peak index. Three
+lines of arithmetic for an order-of-magnitude accuracy gain.
+
+The denominator is the discrete second derivative - the curvature. If it is
+near zero the three points are collinear, there is no well-defined vertex, and
+dividing would explode, so the code bails out with no correction. It also
+rejects any fitted offset beyond one full sample as a pathological fit.
+
+REFINEMENT 2 - SPECTRAL UPSAMPLING  (interp = 4)
+------------------------------------------------
+PROBLEM: refinement 1 assumes the peak is parabola-shaped. It is not. After
+whitening, the ideal peak is SINC-shaped (a Dirichlet kernel). Fitting a
+parabola to a sinc across whole samples has a SYSTEMATIC bias, worst when the
+true peak sits near halfway between two samples.
+
+This was measured, not theorised: a known 33.25-sample delay came back as
+33.14 - an error of 0.11 samples, which exceeded the accuracy target.
+
+SOLUTION: zero-pad the spectrum before the inverse FFT. Zero-padding in the
+frequency domain is EXACT sinc interpolation in the time domain - it evaluates
+the same continuous correlation function on a 4x finer lag grid. The parabola
+then only has to fit a much narrower slice of the sinc, where a parabola is a
+good local approximation. Residual bias falls by roughly interp^2.
+
+Effect in the worked example: lag resolution improves from 0.000125 s to
+0.00003125 s, i.e. from 0.075 m to 0.01875 m of position per lag step - before
+interpolation is even applied.
+
+REFINEMENT 3 - BAND-LIMITING THE CORRELATION  (the big one)
+-----------------------------------------------------------
+PROBLEM: this is the flip side of PHAT's strength. Whitening forces every
+frequency bin to unit magnitude. That is what sharpens the peak - but it also
+means a bin containing NOTHING BUT NOISE is amplified to exactly the same
+weight as a bin full of clean leak signal. Its phase is random, so it votes
+for a random lag.
+
+Our leak radiates only 100-2000 Hz. Sensor noise is broadband, across the full
+0-4000 Hz. So above 2 kHz there is NO SIGNAL AT ALL - yet unrestricted PHAT
+gives those bins full voting rights. At low SNR they outvote the real ones and
+the estimate collapses.
+
+SOLUTION: zero every bin outside the leak's band, after whitening. In the
+worked example this leaves 1901 of 4001 bins contributing - the other 2100
+were pure noise and are now silent.
+
+MEASURED EFFECT: in a heavy-noise test case, error fell from 136 m to 41 m -
+a 3.3x improvement from a handful of lines.
+
+The trade-off, stated honestly: a narrower band means a broader sinc, so the
+peak widens slightly and precision drops a little. That is a small price for a
+large robustness gain, and it is the right trade.
+
+
+================================================================================
+ PART 6   WHY THERE IS A CONFIDENCE GATE (the most important part)
+================================================================================
+
+THE DISCOVERY
+-------------
+Accuracy was measured across noise levels, 60 random seeds each, on a 200 m
+pipe at 1200 m/s:
+
+    noise level | median error | within 2 m | mean sharpness
+    ------------|--------------|------------|----------------
+       0.00     |     0.00 m   |    100%    |     69.7
+       0.05     |     0.00 m   |    100%    |     61.1
+       0.20     |     0.00 m   |    100%    |     27.3
+       0.50     |     0.01 m   |     97%    |      8.4
+       1.00     |    65.35 m   |     13%    |      4.6
+       2.00     |    64.21 m   |      2%    |      4.6
+
+Read that table carefully. It is not a gentle slope - it is a CLIFF.
+
+Up to noise 0.5 the system is essentially exact. At 1.0 the median error is
+65 m on a 200 m pipe, which is barely better than guessing. There is almost no
+middle ground.
+
+WHY IT FAILS THAT WAY
+---------------------
+Past a certain noise level GCC-PHAT does not DRIFT - it JUMPS. The correlation
+peak stops being the tallest feature, some noise artefact elsewhere wins the
+argmax, and the reported lag becomes essentially random. The root cause is the
+one described in refinement 3: whitening gives noise-dominated bins the same
+vote as signal-dominated ones.
+
+WHY THIS IS DANGEROUS, NOT JUST INACCURATE
+------------------------------------------
+The system still returns a number. It looks just as precise as a good one -
+"the leak is at 112.6 m", to four decimal places. Acting on it means sending a
+crew to dig up a road in the wrong place.
+
+A confidently wrong answer is worse than no answer at all. This is the central
+safety problem in the system, and it needs an explicit guard.
+
+THE GUARD
+---------
+Alongside the delay, GCC-PHAT reports
+
+        sharpness = peak height / mean correlation level
+
+which measures how far the peak stands clear of the noise floor. A tall,
+isolated spike means a real measurement. A peak barely above the floor means
+the argmax was arbitrary. Crucially, this is computed WITHOUT any knowledge of
+the true answer, so it is exactly what a real deployment would have available.
+
+`DetectionResult.is_confident` compares it against a threshold, and the UI
+switches from a green located position to an explicit "location unreliable".
+
+HOW THE THRESHOLD WAS CALIBRATED - INCLUDING GETTING IT WRONG FIRST
+-------------------------------------------------------------------
+This part is worth telling honestly, because it is a real lesson.
+
+  FIRST ATTEMPT: 320 runs suggested a threshold of 6.0 gave 100% precision -
+  every estimate above it was accurate, and the worst inaccurate one scored
+  5.81. Clean separation. It looked settled.
+
+  IT WAS WRONG. Broader sweeping found a counterexample: sharpness 6.25 with a
+  26.6 m error. A CONFIDENTLY WRONG result - exactly the failure the gate
+  exists to prevent. The threshold had been overfitted to too narrow a sample.
+
+  RECALIBRATION: 1400 runs spanning noise 0.0-2.0, four pipe geometries
+  (100-500 m, 1000-1500 m/s) and random leak positions. The worst inaccurate
+  estimate scored 7.98.
+
+  FINAL THRESHOLD: 10.0 - about 25% margin above the worst observed failure,
+  while still accepting 62% of all runs.
+
+    threshold | confident runs | precision | recall
+    ----------|----------------|-----------|-------
+        6     |   611 / 1400   |   98.04%  |  84.0%
+        7     |   544 / 1400   |   99.82%  |  76.2%
+        8     |   509 / 1400   |  100.00%  |  71.4%
+       10     |   445 / 1400   |  100.00%  |  62.4%   <- chosen
+       15     |   342 / 1400   |  100.00%  |  48.0%
+
+  Note that 8.0 also achieves 100% precision, but with ZERO margin - it sits
+  exactly at the worst observed failure. 10.0 buys headroom.
+
+THE HONEST CAVEAT
+-----------------
+This is an EMPIRICAL bound from one simulator, not a proof. It says "across
+1400 synthetic runs, nothing above 10.0 was wrong." It does not guarantee
+nothing ever will be. A real deployment must re-derive the threshold from
+field data.
+
+THE TEST THAT ENFORCES IT
+-------------------------
+`test_never_confidently_wrong` is the most important test in the suite. It
+sweeps 105 runs across noise 0.0-2.0 and varying leak positions, and asserts
+the actual safety invariant:
+
+        WHENEVER the system declares itself confident, it MUST be accurate.
+
+Being inaccurate is permitted - but only when also flagged unreliable. The
+test also guards against passing trivially by never being confident at all
+(it requires at least 25 confident results).
+
+This is a much more valuable property than any arbitrary error tolerance,
+because it is the property an operator actually depends on.
+
+
+================================================================================
+ PART 7   FILE-BY-FILE CODE MAP
+================================================================================
+
+  app.py
+      Streamlit UI, presentation only - no physics or DSP lives here, so the
+      maths stays testable without a browser. Written for a reader with NO
+      signal-processing background: every heading is a plain sentence, and all
+      jargon lives inside opt-in "For the curious" expanders.
+      Page 1 "Set up and run": the problem stated in three sentences, then the
+              three sliders phrased as questions ("How fast does sound travel
+              in it?"), a plain-English label for the noise level ("Noisy -
+              traffic passing overhead"), advanced settings collapsed by
+              default, and a "Start the leak" button.
+      Page 2 "See the result": the answer as a sentence, three headline
+              numbers, a "why this is remarkable" callout putting the accuracy
+              in human scale, then the method as three narrated steps with
+              their plots, the pipe diagram, an explicit "can we trust this?"
+              verdict, and expanders for the arithmetic, the algorithm and the
+              limitations.
+
+      Helpers worth knowing: describe_noise() turns the abstract slider number
+      into a physical description; human_scale_comparison() converts the error
+      into a precision ratio and maps it onto the London-Paris distance;
+      format_distance() picks readable units across eight orders of magnitude.
+
+  src/aeld/config.py            137 lines
+      SimulationConfig - one frozen dataclass holding every tunable constant,
+      plus derived properties (duration_s, n_samples, max_tau_s) computed so
+      they can never drift out of sync. frozen=True makes a run's settings an
+      immutable snapshot. Also documents where the 10.0 confidence threshold
+      came from.
+
+  src/aeld/signals.py           238 lines
+      The forward model. fractional_delay() (FFT phase ramp, with the Nyquist
+      correction), _generate_leak_source() (bandpassed noise), and
+      generate_sensor_signals() (geometry -> delays -> attenuation -> noise).
+
+  src/aeld/gccphat.py           284 lines
+      gcc_phat() - the algorithm, with band-limiting, upsampling and parabolic
+      refinement. locate_leak() - the (L + v.tau)/2 conversion with clipping.
+      _parabolic_interpolation() - the three-point vertex fit.
+
+  src/aeld/detector.py
+      DetectionResult (the dataclass carrying answer + diagnostics + plotting
+      arrays, with .is_confident and .error_percent), and run_detection() -
+      which orders the three stages and times each with perf_counter.
+
+  archive/ml_model/
+      cnn_filter.py - the removed CNN, intact and unmodified.
+      README.md     - why it went, how to reinstate it, how to train it.
+      Nothing in the active system imports either.
+
+  src/aeld/__init__.py           40 lines
+      Public API re-exports, so callers write `from aeld import ...`.
+
+  tests/test_gccphat.py         301 lines
+      Known-delay recovery (including fractional delays), sign convention,
+      peak sharpness for correlated vs. uncorrelated input, lag-range
+      bounding, the three locate_leak boundary cases plus clamping, end-to-end
+      accuracy, and the confidence-gate invariant tests.
+
+  tests/test_signals.py         197 lines
+      Fractional delay behaviour (integer shift, half-sample split, energy),
+      geometry, attenuation asymmetry, array shapes, noise scaling, seed
+      reproducibility, position clamping, config derived properties.
+
+  setup.py                      248 lines
+      Not a setuptools script - a dependency-free installer. Detects the
+      platform and picks the right PyTorch wheel index: Apple Silicon ->
+      default PyPI wheel (ships MPS); NVIDIA -> CUDA 12.1 index; otherwise ->
+      CPU-only index. Installs via `sys.executable -m pip` so packages land in
+      the interpreter that runs it. Reports the live torch device at the end.
+
+  requirements.txt / pytest.ini / claude.md / context.md / EXPLANATION.txt
+      Dependencies (grouped, with optional extras marked), pytest config
+      (pythonpath=src), the original brief, the progress log, and this file.
+
+  Line counts are deliberately omitted here because they drift; run
+  `wc -l app.py src/aeld/*.py tests/*.py` for current figures.
+
+
+================================================================================
+ PART 8   HOW TO RUN IT
+================================================================================
+
+  # Install dependencies (only needed on a fresh machine)
+  python setup.py                  # everything the demo needs
+  python setup.py --with-ml        # also PyTorch, for the archived CNN
+  python setup.py --full           # also WNTR / FastAPI / MQTT / librosa
+  python setup.py --check          # report the environment, install nothing
+
+  # Verify the maths
+  python -m pytest                 # 38 tests, ~2 seconds
+
+  # Launch the demo
+  streamlit run app.py
+
+VERIFIED IN THIS ENVIRONMENT
+----------------------------
+  Python 3.13.5, numpy 1.26.4, scipy 1.17.1, streamlit 1.50.0,
+  matplotlib 3.11.1, pytest 9.1.1
+
+  The prototype needs NO machine-learning dependency. Confirmed directly:
+  'torch' in sys.modules is False after a full detection.
+
+  38/38 tests passing in ~1 s. App boots clean: HTTP 200, no errors or
+  warnings in the log. Everything was already installed, so setup.py was not
+  needed here - it is written and platform-correct for a fresh machine.
+
+
+================================================================================
+ PART 9   SUGGESTED DEMO SCRIPT
+================================================================================
+
+A five-minute run-through that builds the idea before showing the result.
+
+  1. FRAME THE PROBLEM  (30 s)
+     "The pipe is buried. We need to know where to dig, to within a metre,
+     over 200 metres. A leak hisses continuously - so put a microphone at each
+     end. Both hear the same hiss, but the nearer one hears it first."
+
+  2. SHOW THE CONFIGURATION  (page 1, 45 s)
+     Point out the three sliders. Emphasise wave velocity: "position scales
+     directly with this, so it is the number you calibrate in the field."
+     Note the derived panel - especially "resolution per sample", which shows
+     what one sample of timing is worth in metres.
+
+  3. TRIGGER A RANDOM LEAK  (15 s)
+     Press the button. The position is chosen randomly and hidden from the
+     detector. Note the reported total time.
+
+  4. SHOW WHAT THE SENSORS HEARD  (page 2, 45 s)
+     "Two traces of hiss. One is slightly louder because it is closer. The
+     time offset we need is about 500 samples - completely invisible by eye.
+     That is why we need mathematics, not inspection."
+
+  5. THE KEY SLIDE - THE CORRELATION CURVE  (90 s)
+     "This asks: how well do the two recordings agree if I slide one against
+     the other? The peak is the offset where they line up - and that offset IS
+     the answer." Show the detected peak line sitting on top of the true-delay
+     line. Then tick 'Zoom in on the peak' and explain that the dots are the
+     discrete lags computed, the true peak falls between them, and a parabola
+     through the top three dots finds the vertex - which is where sub-sample
+     precision comes from.
+
+  6. THE ARITHMETIC  (30 s)
+     Show d = (L + v.tau)/2 with the real numbers substituted, and the error.
+     Then the to-scale pipe diagram: true vs. detected marker.
+
+  7. THE BEST PART - BREAK IT ON PURPOSE  (60 s)
+     Go back to page 1, push the noise slider to 1.5, and trigger again.
+     The result page turns red: "location unreliable."
+     "GCC-PHAT does not fail gracefully - past a certain noise level it stops
+     drifting and starts jumping to random lags. It would still hand you a
+     number that looks precise to four decimal places. So the system measures
+     how far the correlation peak stands above the noise floor, and refuses to
+     commit when that margin is too small. The threshold was calibrated over
+     1400 runs. A system that knows when it doesn't know is worth more than one
+     that is occasionally spectacularly wrong."
+
+  8. IF ASKED ABOUT MACHINE LEARNING  (20 s)
+     Be straight: there is none, deliberately. An untrained CNN placeholder was
+     removed because it added the heaviest dependency and the slowest stage
+     while contributing nothing - the system got 33x faster without it. The
+     localisation is deterministic signal processing, explainable line by line
+     and covered by tests. The honest gap is that it cannot yet tell a leak
+     from a passing truck; that needs a trained classifier and labelled field
+     recordings. The module is archived and ready to revive.
+
+
+================================================================================
+ PART 10   QUESTIONS YOU ARE LIKELY TO BE ASKED
+================================================================================
+
+Q: Why not just use the loudest sensor to tell you which end it is near?
+A: Amplitude depends on pipe material, soil, sensor coupling and the size of
+   the leak - all unknown and highly variable. Timing depends only on distance
+   and wave speed. Timing is a far more reliable observable, which is why the
+   algorithm ignores amplitude entirely.
+
+Q: Why GCC-PHAT rather than plain cross-correlation?
+A: Plain correlation gives a broad, rounded peak for band-limited noise, and
+   lets loud frequencies dominate regardless of how informative they are.
+   Whitening makes every frequency contribute equally and collapses the peak
+   to a sharp spike. See PART 4.2.
+
+Q: How accurate is it?
+A: At default settings (noise 0.15) the error is around a tenth of a
+   millimetre - the localisation is essentially exact when the signal supports
+   it. It stays sub-centimetre up to noise 0.5. Past that it fails, and the
+   confidence gate says so. Full table in PART 6.
+
+Q: What is the resolution limit?
+A: One sample of delay at 8 kHz and 1200 m/s equals 0.075 m of position.
+   Spectral upsampling takes that to 0.019 m, and parabolic interpolation goes
+   below it again. In practice the limiting factor is not sampling - it is
+   uncertainty in the assumed wave velocity.
+
+Q: Does it work on a real pipe?
+A: The signal processing would transfer directly. What this prototype does not
+   model is multipath from junctions and branches, frequency-dependent
+   attenuation, and dispersion. Those complicate the correlation and would be
+   the main work in a field version.
+
+Q: How many sensors do you need?
+A: Two per pipe section, which gives exactly one solution. Three or more makes
+   the problem over-determined, which allows self-consistency checks - a
+   genuinely valuable next step.
+
+Q: Is machine learning doing the localisation?
+A: No - there is no machine learning in the system at all. The localisation is
+   pure signal processing: deterministic, explainable, and unit-tested. An
+   untrained CNN placeholder was removed (see PART 4.4); its intended job was
+   rejecting non-leak events, not locating them.
+
+Q: Isn't the lack of AI a weakness?
+A: Not for this task. Locating the leak is a physics problem with an exact
+   closed-form answer, so a learned model would be strictly worse: slower,
+   opaque, and impossible to unit-test. Machine learning earns its place on the
+   DIFFERENT question of classifying what the sound is - and there it needs
+   labelled field data before it means anything.
+
+Q: How would you know if it mistook a truck for a leak?
+A: Right now, you would not - and that is the honest capability gap. The
+   confidence gate answers "can I trust this location?", never "is this really
+   a leak?". Closing it is the top item in PART 12.
+
+Q: What happens if there are two leaks?
+A: Not handled. The correlation would show two peaks and the code takes the
+   larger. Multi-leak separation is a genuinely harder problem and out of
+   scope here.
+
+
+================================================================================
+ PART 11   WHAT IS REAL AND WHAT IS NOT
+================================================================================
+
+A single table to prevent overclaiming. Being precise here builds credibility
+rather than costing it.
+
+  REAL AND VERIFIED
+  -----------------
+    - GCC-PHAT implementation, with band-limiting and sub-sample refinement
+    - The TDoA -> position geometry, with all three boundary cases tested
+    - The forward acoustic model: fractional delays, exponential attenuation,
+      independent per-channel noise, zero-phase band-limiting
+    - The confidence metric and its 1400-run calibration
+    - Timing measurements
+    - 38 tests covering the maths, including the safety invariant
+
+  REAL BUT SIMPLIFIED
+  -------------------
+    - Single straight pipe: no junctions, branches or reflections
+    - Attenuation is one exponential coefficient, not frequency-dependent
+    - Wave velocity assumed known, constant and uniform
+    - The leak source is synthetic band-limited noise, not a recording
+
+  NOT PRESENT AT ALL
+  ------------------
+    - Any machine learning. The untrained CNN placeholder was removed; the
+      module is archived under archive/ml_model/.
+    - Any leak/non-leak classification. The system assumes what it hears is a
+      leak and locates it. It makes no classification claim whatsoever.
+    - WNTR hydraulic simulation: declared in requirements, not wired in.
+    - FastAPI backend and MQTT telemetry: declared, not wired in.
+
+
+================================================================================
+ PART 12   LIMITATIONS AND NEXT STEPS
+================================================================================
+
+LIMITATIONS, PLAINLY
+--------------------
+  1. No classification. The system cannot tell a leak from a truck, a pump or
+     a running tap - it assumes a leak and locates it.
+  2. Single pipe, no reflections or multipath. Real networks are messier.
+  3. Wave velocity is assumed known; position error tracks velocity error 1:1.
+  4. Attenuation is not frequency-dependent, though real attenuation is.
+  5. GCC-PHAT fails off a cliff, not a slope. Mitigated by the confidence
+     gate, not solved.
+  6. The confidence threshold is calibrated on synthetic data only.
+  7. Two sensors give exactly one solution - no redundancy, no cross-check.
+  8. Single-leak assumption.
+
+NEXT STEPS, ROUGHLY IN ORDER OF VALUE
+-------------------------------------
+  1. Train a real classifier on labelled leak / non-leak recordings and
+     reinstate it as Stage 2. archive/ml_model/README.md has the restore steps
+     and a training checklist. This is the single biggest gap between prototype
+     and product - and note that the archived module gives you working
+     plumbing, NOT a working classifier.
+  2. Replace strict PHAT with coherence-weighted (Hannan-Thomson) GCC, which
+     weights each bin by how much signal it actually contains rather than
+     giving all bins equal votes. It degrades far more gracefully than the
+     cliff documented in PART 6 - this directly attacks the main weakness.
+  3. Extend to three or more sensors for over-determined localisation and
+     self-consistency checks.
+  4. Wire WNTR for genuine hydraulic modelling driving signal amplitude.
+  5. Expose the detector over FastAPI and stream sensor frames over MQTT, so
+     it becomes a service rather than a demo.
+  6. Calibrate wave velocity in situ - e.g. from a known induced transient -
+     rather than assuming it.
+
+================================================================================
+ END
+================================================================================

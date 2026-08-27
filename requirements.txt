@@ -1,0 +1,51 @@
+# ============================================================================
+# AELD Prototype - Python dependencies
+# ============================================================================
+# Install with:   python setup.py
+# ----------------------------------------------------------------------------
+
+# --- Everything the working system actually needs ---------------------------
+numpy>=1.26,<3.0            # array math, FFTs, random number generation
+scipy>=1.11                 # Butterworth filters, signal utilities
+streamlit>=1.32             # the two-page interactive UI
+matplotlib>=3.8             # waveform + correlation plots
+
+# --- Testing ----------------------------------------------------------------
+pytest>=8.0
+
+# ============================================================================
+# OPTIONAL / NOT USED BY THE CURRENT SYSTEM
+# ============================================================================
+# Everything below is declared for stack completeness and future work. None of
+# it is imported by src/aeld/ or app.py, so none of it needs to be installed
+# for the prototype to run. Install with:  python setup.py --full
+# ----------------------------------------------------------------------------
+
+# --- Machine learning (ARCHIVED) -------------------------------------------
+# The PyTorch CNN "is this a leak?" noise filter was removed from the pipeline
+# because it was an untrained stub returning a hard-coded probability: it
+# contributed nothing to the result while being the slowest stage and the
+# heaviest dependency. The module is preserved intact in archive/ml_model/,
+# with reinstatement instructions in archive/ml_model/README.md.
+#
+# setup.py retains full platform-aware wheel selection for this (Apple Silicon
+# MPS / NVIDIA CUDA / CPU fallback). Install with: python setup.py --with-ml
+# torch>=2.2
+
+# --- Audio feature extraction (unused) -------------------------------------
+# Was only needed by the archived CNN's spectrogram path, and even there
+# scipy.signal.spectrogram was used instead to avoid the hard dependency.
+# librosa>=0.10
+
+# --- Physics simulation (unused) -------------------------------------------
+# WNTR is the EPANET wrapper for full hydraulic network modelling. The
+# single-pipe prototype models the acoustics analytically, which is exact for
+# this geometry, so WNTR would add nothing to a timing measurement.
+# wntr>=1.0
+
+# --- Backend & telemetry (unused) ------------------------------------------
+# For a future version that exposes the detector over HTTP and streams sensor
+# frames over MQTT rather than running as a local demo.
+# fastapi>=0.110
+# uvicorn>=0.27
+# paho-mqtt>=2.0
