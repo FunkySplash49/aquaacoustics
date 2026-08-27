@@ -118,6 +118,41 @@ def test_sensor_separation_matches_constant():
     assert separation_m == pytest.approx(ON_MAP_SENSOR_SEPARATION_M, rel=1e-6)
 
 
+@pytest.mark.parametrize("override_length", [1000.0, 500.0, 33.0])
+def test_interpolate_with_override_length_uses_override_not_preset(override_length):
+    """
+    Regression test for the "override re-run" bug: when a run used a
+    DIFFERENT pipe length than the site's preset (e.g. the Leak Detection
+    Detail page's "Advanced: override this site's pipe and re-run" control),
+    interpolate_position must divide by that override length, not the site's
+    preset pipe_length_m - otherwise the fraction (and therefore the marker
+    position) is wrong whenever override_length != site.pipe_length_m.
+    """
+    site = SITES[0]
+    assert override_length != site.pipe_length_m   # the whole point of this test
+
+    sensor_a, sensor_b = sensor_coordinates(site)
+    result = interpolate_position(site, override_length / 2.0,
+                                  pipe_length_m=override_length)
+    expected_lat = (sensor_a[0] + sensor_b[0]) / 2.0
+    expected_lng = (sensor_a[1] + sensor_b[1]) / 2.0
+    assert result[0] == pytest.approx(expected_lat, abs=1e-9)
+    assert result[1] == pytest.approx(expected_lng, abs=1e-9)
+
+
+def test_interpolate_without_pipe_length_arg_still_uses_site_preset():
+    """The optional third argument must not change default behaviour when
+    omitted - existing callers (and the landmark tests above) keep working
+    unchanged."""
+    site = SITES[0]
+    sensor_a, sensor_b = sensor_coordinates(site)
+    result = interpolate_position(site, site.pipe_length_m / 2.0)
+    expected_lat = (sensor_a[0] + sensor_b[0]) / 2.0
+    expected_lng = (sensor_a[1] + sensor_b[1]) / 2.0
+    assert result[0] == pytest.approx(expected_lat, abs=1e-9)
+    assert result[1] == pytest.approx(expected_lng, abs=1e-9)
+
+
 def test_polygon_corners_returns_four_points_centred_on_site():
     site = SITES[0]
     corners = polygon_corners(site)

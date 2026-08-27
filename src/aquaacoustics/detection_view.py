@@ -7,13 +7,15 @@ checks), unchanged in substance, now scoped to whichever site was last
 triggered on the Survey Map page.
 """
 
+from datetime import datetime, timezone
+
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 
 from aeld import SimulationConfig, run_detection
 from .sites import get_site
-from .map_view import pick_random_leak_position
+from .map_view import pick_random_leak_position, build_history_entry
 
 
 COLOR_A = "#2E86DE"
@@ -97,9 +99,14 @@ def build_override_config(base_result, pipe_length_m: float,
     )
 
 
-def render_detection_page() -> None:
+def render_detection_page(role: str = "Admin") -> None:
     """The answer in plain language, then the story of how it was reached,
-    for whichever site was last selected on the Survey Map page."""
+    for whichever site was last selected on the Survey Map page.
+
+    `role` is 'Admin' or 'Field Staff' - matches the gating already applied
+    to the Survey Map's "Trigger Detection" button. Field Staff can view
+    everything on this page but cannot trigger a real detection run.
+    """
 
     st.title("Leak Detection Detail")
 
@@ -321,14 +328,32 @@ def render_detection_page() -> None:
                 value=float(config.noise_level), step=0.05)
             st.caption(describe_noise(override_noise))
 
-        if st.button("Re-run detection with these settings"):
-            new_config = build_override_config(
-                result, override_length, override_velocity, override_noise)
-            rng = np.random.default_rng()
-            leak_position = pick_random_leak_position(override_length, rng)
-            new_result = run_detection(leak_position, new_config)
-            st.session_state["site_results"][selected_name] = new_result
-            st.rerun()
+        if role == "Admin":
+            if st.button("Re-run detection with these settings"):
+                new_config = build_override_config(
+                    result, override_length, override_velocity, override_noise)
+                rng = np.random.default_rng()
+                leak_position = pick_random_leak_position(override_length, rng)
+                new_result = run_detection(leak_position, new_config)
+                st.session_state["site_results"][selected_name] = new_result
+
+                # Record this override run in the session history too, the
+                # same way map_view._trigger_detection does for a preset
+                # trigger - otherwise the Survey Map's history table would go
+                # stale relative to the marker/result this override just
+                # produced. Note: build_history_entry's interface doesn't
+                # support tagging a row as "override" vs. "preset" without
+                # changing its contract, so this row looks the same shape as
+                # any other; that distinction is left as a follow-up.
+                timestamp = datetime.now(timezone.utc)
+                st.session_state["history"].append(
+                    build_history_entry(site, new_result, timestamp))
+
+                st.rerun()
+        else:
+            st.caption(
+                "Field Staff view: read-only. Ask an Admin to re-run."
+            )
 
     # ------------------------------------------------------------------
     # 5. FOR THE CURIOUS

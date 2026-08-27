@@ -124,7 +124,8 @@ def sensor_coordinates(site: Site) -> tuple:
     return a, b
 
 
-def interpolate_position(site: Site, computed_distance_m: float) -> tuple:
+def interpolate_position(site: Site, computed_distance_m: float,
+                         pipe_length_m: float = None) -> tuple:
     """
     Where the DETECTOR'S REAL RESULT is drawn on the map.
 
@@ -133,8 +134,16 @@ def interpolate_position(site: Site, computed_distance_m: float) -> tuple:
     drawn on the map, by straight linear interpolation on fraction of pipe
     length. This is never a random point - see the design doc's "honest
     marker" decision.
+
+    `pipe_length_m` defaults to the site's preset (`site.pipe_length_m`) when
+    not given. Pass it explicitly when the run that produced
+    `computed_distance_m` used a DIFFERENT pipe length than the site's preset
+    (e.g. the "Advanced: override this site's pipe and re-run" control) -
+    otherwise the fraction is computed against the wrong denominator and the
+    marker is placed incorrectly.
     """
-    fraction = computed_distance_m / site.pipe_length_m
+    length = site.pipe_length_m if pipe_length_m is None else pipe_length_m
+    fraction = computed_distance_m / length
     fraction = max(0.0, min(1.0, fraction))     # clamp for safety
 
     on_map_distance_m = fraction * ON_MAP_SENSOR_SEPARATION_M

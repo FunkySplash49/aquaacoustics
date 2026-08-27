@@ -51,6 +51,33 @@ def test_field_staff_sees_no_trigger_button():
     assert len(at.button) == 0
 
 
+def test_field_staff_sees_no_buttons_on_detection_detail_page_either():
+    """
+    Regression test: the Leak Detection Detail page's "Advanced: override
+    this site's pipe and re-run" control has its own button, separate from
+    the Survey Map's "Trigger Detection" button. Field Staff must not see
+    ANY button on that page either, or they could still trigger a real
+    detection run despite being read-only everywhere else.
+    """
+    at = _run_app()
+
+    # Trigger as Admin first, so there IS a result to view on the Detail page.
+    assert at.session_state["role"] == "Admin"
+    at.button[0].click().run(timeout=30)
+    assert not at.exception
+
+    # Now switch to Field Staff.
+    at.sidebar.radio[0].set_value("Field Staff").run(timeout=30)
+    assert not at.exception
+    assert at.session_state["role"] == "Field Staff"
+
+    # And switch to the Leak Detection Detail page.
+    at.sidebar.radio[1].set_value("Leak Detection Detail").run(timeout=30)
+    assert not at.exception
+    assert any("Leak Detection Detail" in t.value for t in at.title)
+    assert len(at.button) == 0
+
+
 def test_detection_detail_page_renders_the_triggered_result():
     at = _run_app()
     at.button[0].click().run(timeout=30)

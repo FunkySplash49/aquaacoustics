@@ -71,7 +71,7 @@ That fraction tells you where the leak is.
 if page == "Survey Map":
     render_map_page(role)
 else:
-    render_detection_page()
+    render_detection_page(role)
 
 st.sidebar.divider()
 st.sidebar.caption(

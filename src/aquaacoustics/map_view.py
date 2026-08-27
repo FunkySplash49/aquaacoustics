@@ -109,9 +109,26 @@ def render_map_page(role: str) -> None:
     st.session_state["selected_site"] = selected_name
     site = get_site(selected_name)
 
-    st.caption(f"{site.state} - preset pipe: {site.pipe_length_m:.0f} m, "
-               f"{site.wave_velocity_ms:.0f} m/s, "
-               f"noise level {site.noise_level:.2f}")
+    result = st.session_state["site_results"].get(site.name)
+
+    # Once a detection has run for this site, describe the pipe that was
+    # ACTUALLY used for that run (result.config), not the site's own preset -
+    # an "Advanced: override" re-run on the Leak Detection Detail page can use
+    # a different pipe length than the preset, and the preset is no longer
+    # what was actually run. Before anything has run, the preset is the only
+    # meaningful number, so fall back to it.
+    if result is not None:
+        described_length = result.config.pipe_length_m
+        described_velocity = result.config.wave_velocity_ms
+        described_noise = result.config.noise_level
+    else:
+        described_length = site.pipe_length_m
+        described_velocity = site.wave_velocity_ms
+        described_noise = site.noise_level
+
+    st.caption(f"{site.state} - preset pipe: {described_length:.0f} m, "
+               f"{described_velocity:.0f} m/s, "
+               f"noise level {described_noise:.2f}")
 
     if role == "Admin":
         if st.button("Trigger Detection", type="primary"):
@@ -120,8 +137,6 @@ def render_map_page(role: str) -> None:
         st.caption(
             "Field Staff view: read-only. Ask an Admin to trigger detection."
         )
-
-    result = st.session_state["site_results"].get(site.name)
 
     if result is not None:
         map_center = (site.lat, site.lng)
@@ -159,13 +174,17 @@ def render_map_page(role: str) -> None:
         ).add_to(fmap)
         folium.Marker(
             location=sensor_b,
-            tooltip=f"Sensor B ({site.pipe_length_m:.0f} m)",
+            tooltip=f"Sensor B ({described_length:.0f} m)",
             icon=folium.Icon(color="orange", icon="microphone", prefix="fa"),
         ).add_to(fmap)
 
         # The honest marker: always the detector's real computed position,
         # never a random point. See the design doc for why this matters.
-        leak_point = interpolate_position(site, result.estimated_position_m)
+        # Divide by the REAL run's pipe length (result.config.pipe_length_m),
+        # not the site's preset - an override re-run can use a different
+        # length, and dividing by the wrong one places the marker incorrectly.
+        leak_point = interpolate_position(
+            site, result.estimated_position_m, result.config.pipe_length_m)
         marker_color = "green" if result.is_confident else "gray"
         folium.Marker(
             location=leak_point,

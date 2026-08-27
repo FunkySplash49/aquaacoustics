@@ -48,6 +48,8 @@ CORE_PACKAGES = [
     "streamlit>=1.32",    # the web UI
     "matplotlib>=3.8",    # plotting waveforms and the correlation curve
     "pytest>=8.0",        # unit tests that prove the GCC-PHAT math is right
+    "streamlit-folium>=0.23",  # interactive Leaflet/OpenStreetMap map widget
+    "folium>=0.16",        # underlying map-building library (OSM tiles, no API key)
 ]
 
 # Optional extras: declared in the stack, but nothing in src/aeld/ or app.py
@@ -151,7 +153,8 @@ def report_environment() -> None:
     # can be "pip installed" and still fail to load (bad wheel, missing libs).
     print("  Required by the prototype:")
     required_ok = True
-    for module in ("numpy", "scipy", "streamlit", "matplotlib", "pytest"):
+    for module in ("numpy", "scipy", "streamlit", "matplotlib", "pytest",
+                   "folium", "streamlit_folium"):
         try:
             mod = __import__(module)
             # Not every package exposes __version__; fall back to "?".

@@ -30,12 +30,17 @@ quick status.
 - [x] Baseline AELD source imported into this repo's git history
 - [x] **Task 1** — preset site registry + map geometry (`src/aquaacoustics/sites.py`) — reviewed, approved
 - [x] **Task 2** — `streamlit-folium` + `folium` dependencies added — reviewed, approved
+- [x] **Task 3** — Survey Map page (`src/aquaacoustics/map_view.py`) — reviewed, approved
+- [x] **Task 4** — Leak Detection Detail page (`src/aquaacoustics/detection_view.py`) — reviewed, approved
+- [x] **Task 5** — `app.py` router + role picker + end-to-end test — reviewed, approved
+- [x] **Task 6** — docs cleanup (rewrite `claude.md`/`context.md`, remove stale `EXPLANATION.txt`)
 
 ### Remaining
 
-- [ ] **Task 3** — Survey Map page (`src/aquaacoustics/map_view.py`)
-- [ ] **Task 4** — Leak Detection Detail page (`src/aquaacoustics/detection_view.py`)
-- [ ] **Task 5** — `app.py` router + role picker + end-to-end test
-- [ ] **Task 6** — docs cleanup (rewrite `claude.md`/`context.md`, remove stale `EXPLANATION.txt`)
+Nothing left from the original implementation plan — all 6 tasks are
+complete. A final whole-branch code review pass found a handful of
+Critical/Important findings, since fixed (see git history and
+`.superpowers/sdd/final-review-fix-report.md`); a few Minor findings from
+that same review were deliberately deferred as out of scope.
 
 Live task-by-task ledger: `.superpowers/sdd/progress.md`.
