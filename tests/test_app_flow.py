@@ -42,6 +42,13 @@ def test_admin_can_trigger_detection_for_the_selected_site():
     assert result.estimated_position_m >= 0.0
     assert len(at.session_state["history"]) == 1
 
+    # Regression test: verify the rendered page shows the "Last result for"
+    # info message on the same run, not "No detection has been triggered".
+    # This catches the bug where result was read before the button click and
+    # never refreshed, showing stale state even after st.session_state was
+    # correctly updated.
+    assert any("Last result for" in info.value for info in at.info)
+
 
 def test_field_staff_sees_no_trigger_button():
     at = _run_app()

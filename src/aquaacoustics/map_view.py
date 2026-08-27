@@ -138,6 +138,13 @@ def render_map_page(role: str) -> None:
             "Field Staff view: read-only. Ask an Admin to trigger detection."
         )
 
+    # Re-read result after the button's if/else block finishes. If the button was
+    # just clicked, _trigger_detection() mutated st.session_state["site_results"]
+    # but did not call st.rerun(), so on this same script run the earlier read of
+    # result (line 112, used for captions) is now stale. Fetch the updated value
+    # before drawing the map and showing the info message.
+    result = st.session_state["site_results"].get(site.name)
+
     if result is not None:
         map_center = (site.lat, site.lng)
         zoom = SITE_ZOOM
