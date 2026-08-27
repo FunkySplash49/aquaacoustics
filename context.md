@@ -1,6 +1,7 @@
 # context.md — AquaAcoustics progress tracker
 
-## Status: implemented, locally tested, not yet pushed or deployed
+## Status: implemented, tested, reviewed (task-level + final whole-branch,
+including one fix-and-re-review cycle), pushed to GitHub. Not yet deployed.
 
 ## File structure
 
@@ -44,11 +45,31 @@ aquaacoustics/
 9. Docs (`claude.md`, this file) rewritten for the merged project; the
    stale `EXPLANATION.txt` (described the pre-integration `app.py`) was
    removed.
+10. Final whole-branch review (opus) found one Critical issue (the
+    override re-run broke the honest-marker rule — `interpolate_position`
+    divided by the site's preset pipe length instead of the run's actual
+    length) and several Important ones (`setup.py` missing the new map
+    deps, Field Staff able to trigger from the Detail page, override
+    re-runs invisible in session history, a stale `PROGRESS.md`). Fixed in
+    one commit; re-review found the fix's math correct but introduced a
+    new regression (the map rendered one interaction stale right after
+    clicking Trigger Detection); fixed in a second commit; final re-review
+    passed clean.
+11. Pushed to GitHub: `github.com/FunkySplash49/aquaacoustics` (private),
+    branch `main`.
 
 ## Not done (explicitly out of scope for now)
 
-- No `git push` — this repo has no remote configured.
 - No deployment (Streamlit Community Cloud or otherwise).
 - No Next.js/TypeScript component of any kind.
 - No real authentication, no real GPS survey data, no cross-session
   persistence — see `claude.md` "Non-goals".
+- A handful of Minor findings from the final review were deliberately
+  deferred (not correctness bugs): loose type hints in `sites.py`, small
+  DRY duplication in its heading math, no `__post_init__` guard on
+  `pipe_length_m`, the Survey Map's "preset pipe:" caption still says
+  "preset" even when describing an overridden run, `build_override_config`
+  hand-lists fields instead of using `dataclasses.replace`, override
+  history rows are visually indistinguishable from preset-trigger rows,
+  and two tests in `test_sites.py` only exercise one of the six sites. See
+  `.superpowers/sdd/progress.md` for the full list.
